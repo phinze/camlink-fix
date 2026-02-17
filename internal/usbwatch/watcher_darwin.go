@@ -77,8 +77,10 @@ var kCFRunLoopDefaultMode uintptr
 var kCFTypeDictionaryKeyCallBacks uintptr
 var kCFTypeDictionaryValueCallBacks uintptr
 
-// IOKit notification type string
-var kIOMatchedNotification uintptr
+// kIOMatchedNotification is the C string "IOServiceMatched" — a #define in
+// IOKit headers, not an exported symbol. We store it as a null-terminated
+// byte slice and pass a pointer to it.
+var ioServiceMatchedStr = append([]byte("IOServiceMatched"), 0)
 
 func init() {
 	cf, err := purego.Dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
@@ -122,10 +124,6 @@ func init() {
 	purego.RegisterLibFunc(&ioServiceAddMatchingNotification, iokit, "IOServiceAddMatchingNotification")
 	purego.RegisterLibFunc(&ioServiceMatching, iokit, "IOServiceMatching")
 
-	kIOMatchedNotification, err = purego.Dlsym(iokit, "kIOMatchedNotification")
-	if err != nil {
-		panic(err)
-	}
 }
 
 // callbackCtx holds the state passed to the IOKit callback.
@@ -217,7 +215,7 @@ func Watch(ctx context.Context, vendorID, productID int32) <-chan struct{} {
 		var iterator ioIteratorT
 		kr := ioServiceAddMatchingNotification(
 			notifyPort,
-			kIOMatchedNotification,
+			uintptr(unsafe.Pointer(&ioServiceMatchedStr[0])),
 			cfMutableDictRef(matching),
 			matchCallbackPtr,
 			nil,
@@ -238,7 +236,7 @@ func Watch(ctx context.Context, vendorID, productID int32) <-chan struct{} {
 		// Wire notification port into the current thread's run loop
 		rl := cfRunLoopGetCurrent()
 		source := ioNotificationPortGetRunLoopSource(notifyPort)
-		cfRunLoopAddSource(rl, source, *(*uintptr)(unsafe.Pointer(&kCFRunLoopDefaultMode)))
+		cfRunLoopAddSource(rl, source, **(**uintptr)(unsafe.Pointer(&kCFRunLoopDefaultMode)))
 
 		// Stop the run loop when context is cancelled
 		go func() {
