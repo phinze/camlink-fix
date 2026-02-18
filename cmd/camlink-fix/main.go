@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -23,8 +28,46 @@ const (
 	camLinkProductID = 0x007b
 )
 
+func kickDaemon() {
+	// Find other camlink-fix processes (exclude our own PID)
+	out, err := exec.Command("pgrep", "-x", "camlink-fix").Output()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "no running camlink-fix daemon found")
+		os.Exit(1)
+	}
+
+	myPID := os.Getpid()
+	var targets []int
+	for _, line := range strings.Split(strings.TrimSpace(string(bytes.TrimSpace(out))), "\n") {
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil || pid == myPID {
+			continue
+		}
+		targets = append(targets, pid)
+	}
+
+	if len(targets) == 0 {
+		fmt.Fprintln(os.Stderr, "no running camlink-fix daemon found")
+		os.Exit(1)
+	}
+
+	for _, pid := range targets {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not find process %d: %v\n", pid, err)
+			continue
+		}
+		if err := proc.Signal(syscall.SIGUSR1); err != nil {
+			fmt.Fprintf(os.Stderr, "could not signal process %d: %v\n", pid, err)
+			continue
+		}
+		fmt.Printf("sent SIGUSR1 to camlink-fix (pid %d)\n", pid)
+	}
+}
+
 func main() {
 	var (
+		kick        = flag.Bool("kick", false, "Send SIGUSR1 to a running camlink-fix daemon to trigger an immediate check")
 		uhubctlPath = flag.String("uhubctl-path", "uhubctl", "Path to uhubctl binary")
 		ffmpegPath  = flag.String("ffmpeg-path", "ffmpeg", "Path to ffmpeg binary")
 		deviceName  = flag.String("device-name", "Cam Link 4K", "Camera device name as shown in system_profiler")
@@ -36,6 +79,11 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
 	log.SetPrefix("[camlink-fix] ")
 
+	if *kick {
+		kickDaemon()
+		return
+	}
+
 	log.Printf("starting (device=%q, wake-delay=%s)", *deviceName, *wakeDelay)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -44,6 +92,9 @@ func main() {
 	// Set up signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	usr1Ch := make(chan os.Signal, 1)
+	signal.Notify(usr1Ch, syscall.SIGUSR1)
 
 	// Start watchers
 	wakeCh := sleepwatch.Watch(ctx)
@@ -110,6 +161,8 @@ func main() {
 			go handleEvent("wake", *wakeDelay)
 		case <-usbCh:
 			go handleEvent("usb-arrival", 2*time.Second)
+		case <-usr1Ch:
+			go handleEvent("manual (SIGUSR1)", 0)
 		case sig := <-sigCh:
 			log.Printf("received %s, shutting down", sig)
 			cancel()
