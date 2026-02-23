@@ -65,6 +65,17 @@ func kickDaemon() {
 	}
 }
 
+// isDocked checks whether a USB device matching the given name is present,
+// indicating the machine is connected to its dock.
+func isDocked(deviceName string) bool {
+	out, err := exec.Command("system_profiler", "SPUSBDataType").Output()
+	if err != nil {
+		log.Printf("dock check: system_profiler failed: %v", err)
+		return false
+	}
+	return strings.Contains(string(out), deviceName)
+}
+
 func main() {
 	var (
 		kick        = flag.Bool("kick", false, "Send SIGUSR1 to a running camlink-fix daemon to trigger an immediate check")
@@ -73,6 +84,7 @@ func main() {
 		deviceName  = flag.String("device-name", "Cam Link 4K", "Camera device name as shown in system_profiler")
 		wakeDelay   = flag.Duration("wake-delay", 5*time.Second, "Delay after wake before checking camera")
 		enableNotify = flag.Bool("notify", true, "Send macOS notifications")
+		dockDevice  = flag.String("dock-device", "CalDigit", "USB device name that indicates docked state (empty to disable)")
 	)
 	flag.Parse()
 
@@ -84,7 +96,11 @@ func main() {
 		return
 	}
 
-	log.Printf("starting (device=%q, wake-delay=%s)", *deviceName, *wakeDelay)
+	if *dockDevice != "" {
+		log.Printf("starting (device=%q, wake-delay=%s, dock-device=%q)", *deviceName, *wakeDelay, *dockDevice)
+	} else {
+		log.Printf("starting (device=%q, wake-delay=%s, dock detection disabled)", *deviceName, *wakeDelay)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -109,12 +125,19 @@ func main() {
 	// Debounce: only one reset at a time
 	var resetting atomic.Bool
 
-	handleEvent := func(eventName string, delay time.Duration) {
+	handleEvent := func(eventName string, delay time.Duration, skipDockCheck bool) {
 		if !resetting.CompareAndSwap(false, true) {
 			log.Printf("reset already in progress, dropping %s event", eventName)
 			return
 		}
 		defer resetting.Store(false)
+
+		if *dockDevice != "" && !skipDockCheck {
+			if !isDocked(*dockDevice) {
+				log.Printf("%s event — not docked (%q not found in USB tree), skipping", eventName, *dockDevice)
+				return
+			}
+		}
 
 		log.Printf("%s event — waiting %s before check", eventName, delay)
 		time.Sleep(delay)
@@ -158,11 +181,11 @@ func main() {
 	for {
 		select {
 		case <-wakeCh:
-			go handleEvent("wake", *wakeDelay)
+			go handleEvent("wake", *wakeDelay, false)
 		case <-usbCh:
-			go handleEvent("usb-arrival", 2*time.Second)
+			go handleEvent("usb-arrival", 2*time.Second, false)
 		case <-usr1Ch:
-			go handleEvent("manual (SIGUSR1)", 0)
+			go handleEvent("manual (SIGUSR1)", 0, true)
 		case sig := <-sigCh:
 			log.Printf("received %s, shutting down", sig)
 			cancel()
