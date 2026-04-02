@@ -186,6 +186,10 @@ func main() {
 
 	log.Printf("ready, waiting for events...")
 
+	// Run one health check at startup so we catch a camera that's already
+	// on the bus but broken (e.g. daemon restarted, or machine booted docked).
+	go handleEvent("startup", 2*time.Second)
+
 	for {
 		select {
 		case <-wakeCh:
