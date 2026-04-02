@@ -45,10 +45,16 @@ in
       description = "Seconds to wait after wake before checking the camera.";
     };
 
-    dockDevice = mkOption {
-      type = types.str;
-      default = "CalDigit";
-      description = "USB device name that indicates docked state. Set to empty string to disable dock detection.";
+    retryDelay = mkOption {
+      type = types.int;
+      default = 30;
+      description = "Seconds between retries after a failed health check.";
+    };
+
+    maxRetries = mkOption {
+      type = types.int;
+      default = 10;
+      description = "Maximum number of retries after a failed health check.";
     };
   };
 
@@ -76,7 +82,8 @@ in
           "--device-name" cfg.deviceName
           "--wake-delay" "${toString cfg.wakeDelay}s"
           "--notify=${boolToString cfg.notify}"
-          "--dock-device" cfg.dockDevice
+          "--retry-delay" "${toString cfg.retryDelay}s"
+          "--max-retries" "${toString cfg.maxRetries}"
         ];
         KeepAlive = true;
         RunAtLoad = true;

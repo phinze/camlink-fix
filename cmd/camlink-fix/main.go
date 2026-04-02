@@ -65,26 +65,16 @@ func kickDaemon() {
 	}
 }
 
-// isDocked checks whether a USB device matching the given name is present,
-// indicating the machine is connected to its dock.
-func isDocked(deviceName string) bool {
-	out, err := exec.Command("system_profiler", "SPUSBDataType").Output()
-	if err != nil {
-		log.Printf("dock check: system_profiler failed: %v", err)
-		return false
-	}
-	return strings.Contains(string(out), deviceName)
-}
-
 func main() {
 	var (
-		kick        = flag.Bool("kick", false, "Send SIGUSR1 to a running camlink-fix daemon to trigger an immediate check")
-		uhubctlPath = flag.String("uhubctl-path", "uhubctl", "Path to uhubctl binary")
-		ffmpegPath  = flag.String("ffmpeg-path", "ffmpeg", "Path to ffmpeg binary")
-		deviceName  = flag.String("device-name", "Cam Link 4K", "Camera device name as shown in system_profiler")
-		wakeDelay   = flag.Duration("wake-delay", 5*time.Second, "Delay after wake before checking camera")
+		kick         = flag.Bool("kick", false, "Send SIGUSR1 to a running camlink-fix daemon to trigger an immediate check")
+		uhubctlPath  = flag.String("uhubctl-path", "uhubctl", "Path to uhubctl binary")
+		ffmpegPath   = flag.String("ffmpeg-path", "ffmpeg", "Path to ffmpeg binary")
+		deviceName   = flag.String("device-name", "Cam Link 4K", "Camera device name as shown in system_profiler")
+		wakeDelay    = flag.Duration("wake-delay", 5*time.Second, "Delay after wake before checking camera")
 		enableNotify = flag.Bool("notify", true, "Send macOS notifications")
-		dockDevice  = flag.String("dock-device", "CalDigit", "USB device name that indicates docked state (empty to disable)")
+		retryDelay   = flag.Duration("retry-delay", 30*time.Second, "Delay between retries after failed health check")
+		maxRetries   = flag.Int("max-retries", 10, "Maximum number of retries after a failed health check")
 	)
 	flag.Parse()
 
@@ -96,11 +86,7 @@ func main() {
 		return
 	}
 
-	if *dockDevice != "" {
-		log.Printf("starting (device=%q, wake-delay=%s, dock-device=%q)", *deviceName, *wakeDelay, *dockDevice)
-	} else {
-		log.Printf("starting (device=%q, wake-delay=%s, dock detection disabled)", *deviceName, *wakeDelay)
-	}
+	log.Printf("starting (device=%q, wake-delay=%s, retry=%s×%d)", *deviceName, *wakeDelay, *retryDelay, *maxRetries)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -122,57 +108,79 @@ func main() {
 		Timeout:    3 * time.Second,
 	}
 
-	// Debounce: only one reset at a time
+	// Debounce: only one check/reset cycle at a time
 	var resetting atomic.Bool
 
-	handleEvent := func(eventName string, delay time.Duration, skipDockCheck bool) {
+	// tryFix attempts a health check and reset. Returns true if camera is healthy
+	// (either already healthy or recovered after reset).
+	tryFix := func(eventName string, uhubctlPath string, enableNotify bool) bool {
+		if health.Check(healthCfg) {
+			return true
+		}
+
+		log.Printf("%s: camera not responding, attempting reset...", eventName)
+		if enableNotify {
+			notify.Send("Camera not responding, resetting...")
+		}
+
+		loc, err := reset.FindCamLink(uhubctlPath)
+		if err != nil {
+			log.Printf("ERROR: %v", err)
+			if enableNotify {
+				notify.Send("Could not find Cam Link in USB hub tree")
+			}
+			return false
+		}
+
+		log.Printf("found Cam Link at hub %s port %s", loc.Hub, loc.Port)
+		companion := reset.FindCompanionHub(uhubctlPath, loc)
+
+		if reset.Run(uhubctlPath, loc, companion, healthCfg) {
+			if enableNotify {
+				notify.Send("Camera recovered successfully")
+			}
+			return true
+		}
+
+		if enableNotify {
+			notify.Send("Camera reset failed — try unplugging Cam Link")
+		}
+		return false
+	}
+
+	handleEvent := func(eventName string, delay time.Duration) {
 		if !resetting.CompareAndSwap(false, true) {
 			log.Printf("reset already in progress, dropping %s event", eventName)
 			return
 		}
 		defer resetting.Store(false)
 
-		if *dockDevice != "" && !skipDockCheck {
-			if !isDocked(*dockDevice) {
-				log.Printf("%s event — not docked (%q not found in USB tree), skipping", eventName, *dockDevice)
-				return
-			}
+		if delay > 0 {
+			log.Printf("%s event — waiting %s before check", eventName, delay)
+			time.Sleep(delay)
+		} else {
+			log.Printf("%s event — checking camera health", eventName)
 		}
 
-		log.Printf("%s event — waiting %s before check", eventName, delay)
-		time.Sleep(delay)
-
-		log.Printf("checking camera health...")
-		if health.Check(healthCfg) {
+		if tryFix(eventName, *uhubctlPath, *enableNotify) {
 			log.Printf("camera is healthy")
 			return
 		}
 
-		log.Printf("camera not responding, attempting reset...")
+		// Camera didn't recover — enter retry loop. This covers cases like
+		// the camera being turned on after the Cam Link is already on the bus.
+		log.Printf("entering retry loop (every %s, up to %d attempts)", *retryDelay, *maxRetries)
+		for attempt := 1; attempt <= *maxRetries; attempt++ {
+			time.Sleep(*retryDelay)
+			log.Printf("retry %d/%d: checking camera health...", attempt, *maxRetries)
+			if tryFix(fmt.Sprintf("%s/retry-%d", eventName, attempt), *uhubctlPath, *enableNotify) {
+				log.Printf("camera recovered on retry %d", attempt)
+				return
+			}
+		}
+		log.Printf("giving up after %d retries", *maxRetries)
 		if *enableNotify {
-			notify.Send("Camera not responding, resetting...")
-		}
-
-		loc, err := reset.FindCamLink(*uhubctlPath)
-		if err != nil {
-			log.Printf("ERROR: %v", err)
-			if *enableNotify {
-				notify.Send("Could not find Cam Link in USB hub tree")
-			}
-			return
-		}
-
-		log.Printf("found Cam Link at hub %s port %s", loc.Hub, loc.Port)
-		companion := reset.FindCompanionHub(*uhubctlPath, loc)
-
-		if reset.Run(*uhubctlPath, loc, companion, healthCfg) {
-			if *enableNotify {
-				notify.Send("Camera recovered successfully")
-			}
-		} else {
-			if *enableNotify {
-				notify.Send("Camera reset failed — try unplugging Cam Link")
-			}
+			notify.Send("Camera still not working after retries — try unplugging Cam Link")
 		}
 	}
 
@@ -181,11 +189,11 @@ func main() {
 	for {
 		select {
 		case <-wakeCh:
-			go handleEvent("wake", *wakeDelay, false)
+			go handleEvent("wake", *wakeDelay)
 		case <-usbCh:
-			go handleEvent("usb-arrival", 2*time.Second, false)
+			go handleEvent("usb-arrival", 2*time.Second)
 		case <-usr1Ch:
-			go handleEvent("manual (SIGUSR1)", 0, true)
+			go handleEvent("manual (SIGUSR1)", 0)
 		case sig := <-sigCh:
 			log.Printf("received %s, shutting down", sig)
 			cancel()
