@@ -15,6 +15,11 @@ type Config struct {
 	Timeout    time.Duration
 }
 
+// Listed returns true if the camera appears in system_profiler output.
+func Listed(cfg Config) bool {
+	return isListed(cfg.DeviceName)
+}
+
 // Check returns true if the camera is detected and can produce frames.
 func Check(cfg Config) bool {
 	if !isListed(cfg.DeviceName) {

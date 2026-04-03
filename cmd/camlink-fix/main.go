@@ -167,11 +167,20 @@ func main() {
 			return
 		}
 
-		// Camera didn't recover — enter retry loop. This covers cases like
-		// the camera being turned on after the Cam Link is already on the bus.
+		// Camera didn't recover — enter retry loop, but only if the device
+		// is actually on the bus. No point retrying if it's not plugged in.
+		if !health.Listed(healthCfg) {
+			log.Printf("device not present, skipping retries")
+			return
+		}
+
 		log.Printf("entering retry loop (every %s, up to %d attempts)", *retryDelay, *maxRetries)
 		for attempt := 1; attempt <= *maxRetries; attempt++ {
 			time.Sleep(*retryDelay)
+			if !health.Listed(healthCfg) {
+				log.Printf("retry %d/%d: device disappeared, stopping retries", attempt, *maxRetries)
+				return
+			}
 			log.Printf("retry %d/%d: checking camera health...", attempt, *maxRetries)
 			if tryFix(fmt.Sprintf("%s/retry-%d", eventName, attempt), *uhubctlPath, *enableNotify) {
 				log.Printf("camera recovered on retry %d", attempt)
