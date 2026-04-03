@@ -119,20 +119,19 @@ func main() {
 		}
 
 		log.Printf("%s: camera not responding, attempting reset...", eventName)
-		if enableNotify {
-			notify.Send("Camera not responding, resetting...")
-		}
 
 		loc, err := reset.FindCamLink(uhubctlPath)
 		if err != nil {
 			log.Printf("ERROR: %v", err)
-			if enableNotify {
-				notify.Send("Could not find Cam Link in USB hub tree")
-			}
 			return false
 		}
 
+		// Device is present and broken — now we notify.
 		log.Printf("found Cam Link at hub %s port %s", loc.Hub, loc.Port)
+		if enableNotify {
+			notify.Send("Camera not responding, resetting...")
+		}
+
 		companion := reset.FindCompanionHub(uhubctlPath, loc)
 
 		if reset.Run(uhubctlPath, loc, companion, healthCfg) {
