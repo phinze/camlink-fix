@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/phinze/camlink-fix/internal/camwatch"
 	"github.com/phinze/camlink-fix/internal/health"
 	"github.com/phinze/camlink-fix/internal/notify"
 	"github.com/phinze/camlink-fix/internal/reset"
@@ -101,6 +102,12 @@ func main() {
 	// Start watchers
 	wakeCh := sleepwatch.Watch(ctx)
 	usbCh := usbwatch.Watch(ctx, camLinkVendorID, camLinkProductID)
+
+	// camwatch is observe-only for now: it logs when any app opens a camera so
+	// we can learn whether "someone reached for the camera" is a viable edge
+	// trigger (and whether the signal still fires when the Cam Link is wedged).
+	// It does not drive resets yet.
+	camCh := camwatch.Watch(ctx)
 
 	healthCfg := health.Config{
 		FFmpegPath: *ffmpegPath,
@@ -204,6 +211,9 @@ func main() {
 			go handleEvent("wake", *wakeDelay)
 		case <-usbCh:
 			go handleEvent("usb-arrival", 2*time.Second)
+		case ev := <-camCh:
+			// Observe-only: record demand, don't touch the device yet.
+			log.Printf("camera-open observed (app=%q signal=%s) — not acting (observe-only)", ev.Process, ev.Signal)
 		case <-usr1Ch:
 			go handleEvent("manual (SIGUSR1)", 0)
 		case sig := <-sigCh:
