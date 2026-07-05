@@ -3,6 +3,39 @@
 Notes-to-self for a follow-up session. Context is fresh now (2026-07); it
 won't be later.
 
+## UPDATE — root cause was the health check, not the trigger
+
+The edge-trigger turned out to be a fix for a symptom. The real bug: the health
+check hardcoded a capture format (`1920x1080@59.94`), and a Cam Link advertises
+a *different* mode depending on its HDMI source (locked to a 1080p60 source it's
+`1920x1080@59.94`; with no signal it's `3840x2160@30`). So the moment the mode
+wasn't exactly the hardcoded one, ffmpeg I/O-errored and the daemon read a
+perfectly healthy camera as broken and reset it. That's the aggression, and it
+had nothing to do with *when* we checked.
+
+Verified matrix (capturing at whatever mode the device *advertises*, not a
+hardcoded one):
+
+| state | advertises | grab at advertised mode |
+|---|---|---|
+| healthy + signal | 1920x1080@59.94 | frame, instant |
+| healthy + no signal | its current mode | frame, instant (the Elgato pane) |
+| wedged | stale/nothing, or ports dark | no frame |
+
+Fix shipped: `health.Check` now detects the advertised mode and captures at it,
+and logs ffmpeg stderr on failure. This alone kills the false-positive resets,
+no demand signal required. Also fixed a nastier bug found the same day: an
+interrupted reset (killed during its power-off window) left the USB ports dark,
+which is what actually wedged the camera during debugging. Reset now guarantees
+power-on (deferred) and the daemon calls `reset.Heal` at startup to recover any
+stranded-dark ports.
+
+Net: camwatch/the edge-trigger is now *optional polish* ("don't even bother
+checking unless I care"), not the core fix. Everything below is the original
+investigation, kept for context.
+
+---
+
 ## The idea
 
 Today the daemon fires its check-and-reset on environmental events: `wake`,

@@ -24,16 +24,16 @@ var stages = []stage{
 // Run executes the escalating reset strategy. Returns true if the camera
 // recovers at any stage.
 func Run(uhubctlPath string, loc Location, companionHub string, healthCfg health.Config) bool {
+	// Remember where the device lives so a killed reset can be healed on the
+	// next startup — once ports are off, uhubctl can't find the device to
+	// locate it again.
+	saveLocation(loc, companionHub)
+
 	for _, s := range stages {
 		log.Printf("reset: trying %s (%s off)...", s.name, s.offTime)
 
 		if s.bothPorts && companionHub != "" {
-			// Power off both ports
-			hubctl(uhubctlPath, loc.Hub, loc.Port, "off")
-			hubctl(uhubctlPath, companionHub, loc.Port, "off")
-			time.Sleep(s.offTime)
-			hubctl(uhubctlPath, loc.Hub, loc.Port, "on")
-			hubctl(uhubctlPath, companionHub, loc.Port, "on")
+			cycleBothPorts(uhubctlPath, loc.Hub, companionHub, loc.Port, s.offTime)
 		} else {
 			// Quick cycle using uhubctl's built-in cycle
 			hubctl(uhubctlPath, loc.Hub, loc.Port, "cycle")
@@ -54,6 +54,21 @@ func Run(uhubctlPath string, loc Location, companionHub string, healthCfg health
 
 	log.Printf("reset: camera still not working after all reset stages")
 	return false
+}
+
+// cycleBothPorts powers the device's USB3 hub port and its USB2 companion off
+// for offTime, then back on. The power-on is deferred so it runs even if the
+// off window is interrupted by a panic — a reset must never leave the ports
+// dark. (SIGKILL can't be caught; that case is covered by Heal at startup.)
+func cycleBothPorts(uhubctlPath, hub, companion, port string, offTime time.Duration) {
+	defer func() {
+		hubctl(uhubctlPath, hub, port, "on")
+		hubctl(uhubctlPath, companion, port, "on")
+	}()
+
+	hubctl(uhubctlPath, hub, port, "off")
+	hubctl(uhubctlPath, companion, port, "off")
+	time.Sleep(offTime)
 }
 
 func hubctl(uhubctlPath, hub, port, action string) {

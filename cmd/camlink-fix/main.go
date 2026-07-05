@@ -199,6 +199,11 @@ func main() {
 		}
 	}
 
+	// If a previous reset was killed mid-cycle it may have left the Cam Link's
+	// USB ports powered off. Power them back on before anything else so we
+	// never start up staring at a camera we ourselves stranded dark.
+	reset.Heal(*uhubctlPath)
+
 	log.Printf("ready, waiting for events...")
 
 	// Run one health check at startup so we catch a camera that's already
