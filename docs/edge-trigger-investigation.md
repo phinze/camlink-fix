@@ -30,9 +30,16 @@ which is what actually wedged the camera during debugging. Reset now guarantees
 power-on (deferred) and the daemon calls `reset.Heal` at startup to recover any
 stranded-dark ports.
 
-Net: camwatch/the edge-trigger is now *optional polish* ("don't even bother
-checking unless I care"), not the core fix. Everything below is the original
-investigation, kept for context.
+Net: the health-check fix is the core correctness fix. camwatch was then
+promoted from observe-only to a real trigger — its `device-control` signal (an
+app actually grabbing the camera) now fires a health check, so a wedge that
+develops mid-session gets caught when you open your meeting app instead of
+sitting there unnoticed. Guards: our own probes (ffmpeg/system_profiler) are
+ignored to avoid a self-trigger loop, and a 30s cooldown keeps a live meeting
+from re-probing constantly. So the "need the camera" edge trigger from the
+original investigation did land — it just rides on top of the health-check fix
+rather than replacing it. Everything below is the original investigation, kept
+for context.
 
 ---
 
