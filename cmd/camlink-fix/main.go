@@ -29,24 +29,6 @@ const (
 	camLinkProductID = 0x007b
 )
 
-// demandCooldown rate-limits camera-demand-triggered health checks so a live
-// meeting (which grabs the camera repeatedly) doesn't spawn a probe every few
-// seconds. One check per window is plenty to catch a wedge promptly.
-const demandCooldown = 30 * time.Second
-
-// isOwnProbe reports whether a camera-open came from our own health check
-// rather than a real app. The health check runs system_profiler and ffmpeg,
-// which open the camera and show up in camwatch just like any other client;
-// treating them as demand would make a check trigger itself in a loop.
-func isOwnProbe(process string) bool {
-	switch process {
-	case "ffmpeg", "system_profiler":
-		return true
-	default:
-		return false
-	}
-}
-
 func kickDaemon() {
 	// Find other camlink-fix processes (exclude our own PID)
 	out, err := exec.Command("pgrep", "-x", "camlink-fix").Output()
@@ -121,10 +103,12 @@ func main() {
 	wakeCh := sleepwatch.Watch(ctx)
 	usbCh := usbwatch.Watch(ctx, camLinkVendorID, camLinkProductID)
 
-	// camwatch is observe-only for now: it logs when any app opens a camera so
-	// we can learn whether "someone reached for the camera" is a viable edge
-	// trigger (and whether the signal still fires when the Cam Link is wedged).
-	// It does not drive resets yet.
+	// camwatch is observe-only: it logs when any app opens a camera. We tried
+	// promoting its device-control signal to a real trigger (probe the camera
+	// when an app grabs it), but that made the daemon attach ffmpeg to a
+	// live meeting stream every 30s and tipped a marginal Cam Link into a UVC
+	// interrupt storm. Reverted to observe-only; see the camCh case below and
+	// docs/edge-trigger-investigation.md.
 	camCh := camwatch.Watch(ctx)
 
 	healthCfg := health.Config{
@@ -228,10 +212,6 @@ func main() {
 	// on the bus but broken (e.g. daemon restarted, or machine booted docked).
 	go handleEvent("startup", 2*time.Second)
 
-	// lastDemand tracks the most recent camera-demand-triggered check for the
-	// cooldown. Only the select loop touches it, so no synchronization needed.
-	var lastDemand time.Time
-
 	for {
 		select {
 		case <-wakeCh:
@@ -239,20 +219,14 @@ func main() {
 		case <-usbCh:
 			go handleEvent("usb-arrival", 2*time.Second)
 		case ev := <-camCh:
-			// A device-control grab means an app is actually trying to stream,
-			// which is our "someone needs the camera" edge. Check the camera
-			// right then, so a wedge that developed while the daemon was idle
-			// gets fixed before the user notices. warm-open (mere enumeration)
-			// and our own probes don't count.
-			switch {
-			case ev.Signal != "device-control" || isOwnProbe(ev.Process):
-				log.Printf("camera activity (app=%q signal=%s) — not a trigger", ev.Process, ev.Signal)
-			case time.Since(lastDemand) < demandCooldown:
-				log.Printf("camera demand by %q — within %s cooldown, skipping check", ev.Process, demandCooldown)
-			default:
-				lastDemand = time.Now()
-				go handleEvent(fmt.Sprintf("camera-demand (%s)", ev.Process), 0)
-			}
+			// Observe-only: log that an app reached for the camera, but do NOT
+			// probe. Attaching our own ffmpeg client to a camera an app is
+			// already streaming — on every device-control edge, all meeting
+			// long — is what tipped a marginal Cam Link into a UVC interrupt
+			// storm (load 20-36, ~10k IPI/s, UVCAssistant pinned). Real wedges
+			// are still caught by the startup/wake/usb-arrival checks and the
+			// manual --kick. See docs/edge-trigger-investigation.md.
+			log.Printf("camera activity observed (app=%q signal=%s) — observe-only, not probing", ev.Process, ev.Signal)
 		case <-usr1Ch:
 			go handleEvent("manual (SIGUSR1)", 0)
 		case sig := <-sigCh:

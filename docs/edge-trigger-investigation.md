@@ -3,6 +3,40 @@
 Notes-to-self for a follow-up session. Context is fresh now (2026-07); it
 won't be later.
 
+## UPDATE 2 (2026-07) — reactive trigger REVERTED: it caused a UVC interrupt storm
+
+The `device-control` reactive trigger from UPDATE 1 got reverted. It turned a
+working machine into a molasses swamp: load 20-36 on a 16-core box with almost
+no visible CPU%, terminals crawling.
+
+Mechanism: a health check isn't passive — `canCapture` opens the Cam Link via
+ffmpeg *twice* (a `1x1` mode-detect open, then a capture at the device's full
+advertised mode, e.g. `3840x2160@30`). The reactive trigger fired one of those
+on every `device-control` edge, rate-limited to once per 30s. During a live
+meeting that means the daemon bolts its own ffmpeg client onto the *already
+streaming* camera every 30 seconds, all call long — forcing the macOS UVC stack
+to attach/detach a second client on an active isochronous stream over and over.
+On a marginal Cam Link through a dock, that tips it into a pathological USB
+interrupt pattern: `kernel_task` ~14k wakeups/s, ~10k IPI/s on one core,
+`UVCAssistant` pinned ~550ms/s. The device keeps producing frames (so the health
+check reads "healthy" and never resets — the blind spot), it just floods the bus.
+
+Background apps made it worse: an idle "Around" was throwing `device-control`
+edges every few minutes while the user wasn't even using it, so the daemon was
+poking a live camera all day.
+
+Reverted to observe-only on the camCh path. Real wedges are still caught by the
+`startup`/`wake`/`usb-arrival` checks and the manual `--kick`. The cost is we no
+longer proactively check the instant you open a meeting app; if the camera
+wedges from something *other* than sleep/usb mid-session, hit `--kick`.
+
+If we ever revisit a reactive trigger: the fix is to NOT probe when a real
+client is already streaming successfully (the app's own success IS the health
+signal — probing then is both useless and actively harmful). And/or add
+storm-aware detection (watch the wakeup/IPI rate, not just "did I get a frame")
+so a storm self-heals instead of sitting there. Neither is worth it unless the
+problem recurs with the reactive trigger gone.
+
 ## UPDATE — root cause was the health check, not the trigger
 
 The edge-trigger turned out to be a fix for a symptom. The real bug: the health
